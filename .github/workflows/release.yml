@@ -64,9 +64,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $out = "traytask-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:GITHUB_REF_NAME" -o "dist/$out" .
-          Compress-Archive -Path "dist/$out" -DestinationPath "dist/traytask-${{ matrix.goos }}-${{ matrix.goarch }}.zip" -Force
+          $gui = "traytask-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          $cli = "traytask-cli-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:GITHUB_REF_NAME" -o "dist/$gui" .
+          go build -trimpath -ldflags "-s -w -X main.version=$env:GITHUB_REF_NAME" -o "dist/$cli" .
+          Compress-Archive -Path "dist/$gui","dist/$cli" -DestinationPath "dist/traytask-${{ matrix.goos }}-${{ matrix.goarch }}.zip" -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

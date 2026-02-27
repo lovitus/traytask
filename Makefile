@@ -21,4 +21,5 @@ release-local: clean
 	mkdir -p dist
 	GOOS=linux GOARCH=amd64 go build -o dist/$(APP)-linux-amd64 .
 	GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui" -o dist/$(APP)-windows-amd64.exe .
+	GOOS=windows GOARCH=amd64 go build -o dist/$(APP)-cli-windows-amd64.exe .
 	GOOS=darwin GOARCH=arm64 go build -o dist/$(APP)-darwin-arm64 .
