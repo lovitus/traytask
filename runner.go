@@ -34,6 +34,7 @@ type taskState struct {
 
 type Manager struct {
 	mu       sync.RWMutex
+	logMu    sync.Mutex
 	store    *Store
 	cfg      AppConfig
 	cron     *cron.Cron
@@ -42,6 +43,8 @@ type Manager struct {
 	procs    map[string]*activeProc
 	notifyCh chan struct{}
 }
+
+const maxLogLinesPerTask = 1000
 
 func NewManager(store *Store) (*Manager, error) {
 	cfg, err := store.Load()
@@ -307,6 +310,7 @@ func (m *Manager) DeleteTask(id string) error {
 	delete(m.procs, id)
 	delete(m.states, id)
 	m.cfg.Tasks = append(m.cfg.Tasks[:idx], m.cfg.Tasks[idx+1:]...)
+	_ = os.Remove(m.store.TaskLogPath(id))
 	if err := m.persistLocked(); err != nil {
 		return err
 	}
@@ -594,14 +598,46 @@ func (m *Manager) logSystem(taskID, line string) {
 }
 
 func (m *Manager) logLine(taskID, stream, line string) {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+
 	path := m.store.TaskLogPath(taskID)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
 	}
-	defer f.Close()
 	ts := time.Now().Format(time.RFC3339)
 	_, _ = f.WriteString(fmt.Sprintf("%s [%s] %s\n", ts, stream, line))
+	_ = f.Close()
+	_ = trimLogFileToLastNLines(path, maxLogLinesPerTask)
+}
+
+func trimLogFileToLastNLines(path string, keep int) error {
+	if keep <= 0 {
+		return os.WriteFile(path, []byte{}, 0o644)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	trimmed := bytes.TrimRight(b, "\n")
+	if len(trimmed) == 0 {
+		return nil
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
+	if len(lines) <= keep {
+		return nil
+	}
+	lines = lines[len(lines)-keep:]
+	out := bytes.Join(lines, []byte("\n"))
+	out = append(out, '\n')
+	return os.WriteFile(path, out, 0o644)
 }
 
 func (m *Manager) mergedConfigLocked() AppConfig {
@@ -663,6 +699,9 @@ func (m *Manager) ExportJSON() ([]byte, error) {
 }
 
 func (m *Manager) ReadTaskLogs(taskID string, offset int64, limit int64) (string, int64, bool, error) {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+
 	if offset < 0 {
 		offset = 0
 	}
@@ -684,7 +723,7 @@ func (m *Manager) ReadTaskLogs(taskID string, offset int64, limit int64) (string
 	}
 	size := fi.Size()
 	if offset > size {
-		offset = size
+		offset = 0
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return "", size, false, err

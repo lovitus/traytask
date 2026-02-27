@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -11,10 +10,11 @@ import (
 type TrayApp struct {
 	manager   *Manager
 	dashboard string
+	dataDir   string
 }
 
-func NewTrayApp(manager *Manager, dashboard string) *TrayApp {
-	return &TrayApp{manager: manager, dashboard: dashboard}
+func NewTrayApp(manager *Manager, dashboard, dataDir string) *TrayApp {
+	return &TrayApp{manager: manager, dashboard: dashboard, dataDir: dataDir}
 }
 
 func (t *TrayApp) Run() {
@@ -25,8 +25,16 @@ func (t *TrayApp) onReady() {
 	systray.SetTitle("TrayTask")
 	systray.SetTooltip("TrayTask - 托盘任务管理")
 
-	openItem := systray.AddMenuItem("打开管理台", "Open dashboard")
-	addItem := systray.AddMenuItem("新增任务", "Add task")
+	var openItem *systray.MenuItem
+	var addItem *systray.MenuItem
+	if t.dashboard != "" {
+		openItem = systray.AddMenuItem("打开管理台", "Open dashboard")
+		addItem = systray.AddMenuItem("新增任务", "Add task")
+	} else {
+		disabled := systray.AddMenuItem("网页管理台已禁用(-web=false)", "Web disabled")
+		disabled.Disable()
+	}
+	openDirItem := systray.AddMenuItem("打开数据目录", "Open TrayTask data directory")
 	systray.AddSeparator()
 	statusItem := systray.AddMenuItem("运行概览: 加载中...", "Task summary")
 	statusItem.Disable()
@@ -36,11 +44,17 @@ func (t *TrayApp) onReady() {
 	go func() {
 		for {
 			select {
-			case <-openItem.ClickedCh:
-				_ = openBrowser(t.dashboard)
-			case <-addItem.ClickedCh:
-				u := t.dashboard + "?add=1"
-				_ = openBrowser(u)
+			case <-openDirItem.ClickedCh:
+				_ = openPath(t.dataDir)
+			case <-clickedCh(openItem):
+				if t.dashboard != "" {
+					_ = openBrowser(t.dashboard)
+				}
+			case <-clickedCh(addItem):
+				if t.dashboard != "" {
+					u := t.dashboard + "?add=1"
+					_ = openBrowser(u)
+				}
 			case <-quitItem.ClickedCh:
 				systray.Quit()
 				return
@@ -78,13 +92,9 @@ func (t *TrayApp) onExit() {
 	t.manager.Shutdown()
 }
 
-func withQuery(base string, key string, value string) string {
-	u, err := url.Parse(base)
-	if err != nil {
-		return base
+func clickedCh(item *systray.MenuItem) <-chan struct{} {
+	if item == nil {
+		return nil
 	}
-	q := u.Query()
-	q.Set(key, value)
-	u.RawQuery = q.Encode()
-	return u.String()
+	return item.ClickedCh
 }
