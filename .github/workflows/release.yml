@@ -65,7 +65,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $out = "traytask-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          go build -trimpath -ldflags "-s -w -X main.version=$env:GITHUB_REF_NAME" -o "dist/$out" .
+          go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$env:GITHUB_REF_NAME" -o "dist/$out" .
           Compress-Archive -Path "dist/$out" -DestinationPath "dist/traytask-${{ matrix.goos }}-${{ matrix.goarch }}.zip" -Force
 
       - name: Upload artifacts

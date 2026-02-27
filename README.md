@@ -32,6 +32,11 @@ go run .
 
 默认会自动打开浏览器管理台，并启动托盘图标。
 
+### 双击启动（无需命令行）
+
+- Windows：下载 Release 里的 `traytask-windows-amd64.zip`，解压后直接双击 `traytask-windows-amd64.exe` 即可启动托盘（不弹黑色命令行窗口）。
+- Linux/macOS：把二进制放到可执行位置后可在文件管理器双击启动（需有执行权限）。
+
 可选参数：
 
 - `-open=false`：启动时不自动打开浏览器
