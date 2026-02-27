@@ -1,0 +1,16 @@
+# Binaries
+traytask
+traytask.exe
+*.out
+*.test
+
+# Build artifacts
+dist/
+
+# Local runtime data
+.traytask-data/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/

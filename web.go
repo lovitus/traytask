@@ -1,0 +1,699 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http"
+	"strconv"
+	"strings"
+)
+
+type Server struct {
+	manager *Manager
+	tmpl    *template.Template
+}
+
+func NewServer(manager *Manager) (*Server, error) {
+	tmpl, err := template.New("index").Parse(indexHTML)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{manager: manager, tmpl: tmpl}, nil
+}
+
+func (s *Server) Routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/env", s.handleEnv)
+	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/tasks/", s.handleTaskAction)
+	return mux
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = s.tmpl.Execute(w, map[string]string{})
+}
+
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp := map[string]any{
+		"tasks":     s.manager.ListTasks(),
+		"globalEnv": s.manager.GetGlobalEnv(),
+	}
+	sendJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := s.manager.UpdateGlobalEnv(payload.Env); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var payload taskPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		task := payload.toTask()
+		created, err := s.manager.UpsertTask(task, true)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sendJSON(w, http.StatusCreated, created)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "task id required", http.StatusBadRequest)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 1 {
+		if r.Method == http.MethodPut {
+			var payload taskPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, "invalid json", http.StatusBadRequest)
+				return
+			}
+			task := payload.toTask()
+			task.ID = id
+			updated, err := s.manager.UpsertTask(task, false)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			sendJSON(w, http.StatusOK, updated)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			if err := s.manager.DeleteTask(id); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			sendJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	action := parts[1]
+	switch action {
+	case "toggle":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var payload struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if err := s.manager.ToggleTask(id, payload.Enabled); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sendJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case "run":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.manager.StartTask(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sendJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case "stop":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.manager.StopTask(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sendJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case "logs":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		offset := int64(0)
+		if raw := r.URL.Query().Get("offset"); raw != "" {
+			v, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				http.Error(w, "invalid offset", http.StatusBadRequest)
+				return
+			}
+			offset = v
+		}
+		text, newOffset, eof, err := s.manager.ReadTaskLogs(id, offset, 256*1024)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		sendJSON(w, http.StatusOK, map[string]any{
+			"text":      text,
+			"newOffset": newOffset,
+			"eof":       eof,
+		})
+	default:
+		http.Error(w, fmt.Sprintf("unknown action: %s", action), http.StatusNotFound)
+	}
+}
+
+type taskPayload struct {
+	Name              string            `json:"name"`
+	Command           string            `json:"command"`
+	Type              TaskType          `json:"type"`
+	Enabled           bool              `json:"enabled"`
+	CronExpr          string            `json:"cronExpr"`
+	KillPreviousOnRun bool              `json:"killPreviousOnRun"`
+	Env               map[string]string `json:"env"`
+}
+
+func (p taskPayload) toTask() Task {
+	return Task{
+		Name:              p.Name,
+		Command:           p.Command,
+		Type:              p.Type,
+		Enabled:           p.Enabled,
+		CronExpr:          p.CronExpr,
+		KillPreviousOnRun: p.KillPreviousOnRun,
+		Env:               p.Env,
+	}
+}
+
+func sendJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+func envToText(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, k := range keys {
+		lines = append(lines, k+"="+env[k])
+	}
+	return strings.Join(lines, "\n")
+}
+
+func parseEnvText(raw string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(parts[0])
+		if k == "" {
+			continue
+		}
+		out[k] = strings.TrimSpace(parts[1])
+	}
+	return out
+}
+
+func sortStrings(items []string) {
+	if len(items) < 2 {
+		return
+	}
+	for i := 0; i < len(items)-1; i++ {
+		for j := i + 1; j < len(items); j++ {
+			if items[j] < items[i] {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+	}
+}
+
+const indexHTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TrayTask 管理台</title>
+  <style>
+    :root {
+      --bg: #f4f7f1;
+      --card: #ffffff;
+      --ink: #152018;
+      --muted: #5d6c61;
+      --line: #d5dfd2;
+      --green: #14813a;
+      --amber: #ab6a00;
+      --red: #a12525;
+      --blue: #145ea8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #d9ead7 0%, transparent 70%),
+        radial-gradient(1000px 460px at 90% -20%, #e7efd8 0%, transparent 70%),
+        var(--bg);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1300px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 360px 1fr;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 10px 24px rgba(13, 36, 18, 0.05);
+    }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    h2 { margin: 0 0 10px; font-size: 16px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+    input, select, textarea, button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+    }
+    textarea { min-height: 90px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button {
+      background: linear-gradient(180deg, #1b7a43, #186639);
+      color: #fff;
+      border: 0;
+      cursor: pointer;
+      transition: transform .12s ease, opacity .12s ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button.alt { background: #f3f7f2; color: var(--ink); border: 1px solid var(--line); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .inline { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .inline input { width: auto; }
+    .main { display: grid; gap: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; border-bottom: 1px solid var(--line); padding: 8px; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+    }
+    .dot.green { background: var(--green); }
+    .dot.amber { background: var(--amber); }
+    .dot.red { background: var(--red); }
+    .dot.gray { background: #7c8a7f; }
+    .actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    .actions button { padding: 6px 8px; font-size: 12px; }
+    .actions .danger { background: #b53a3a; }
+    #logPanel { min-height: 240px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0f1e14; color: #bdeecb; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .ok { color: var(--green); }
+    .err { color: var(--red); }
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>TrayTask</h1>
+      <p class="muted">托盘任务管理（长期进程 / 一次性命令 / Cron / 实时日志 / 环境变量）</p>
+
+      <h2 id="taskFormTitle">新增任务</h2>
+      <input id="taskId" type="hidden" />
+      <label>任务名称</label>
+      <input id="name" placeholder="例如: 网络连通性检查" />
+
+      <label>命令</label>
+      <textarea id="command" placeholder="例如: ping 8.8.8.8 或 curl -I https://example.com"></textarea>
+
+      <div class="row">
+        <div>
+          <label>任务类型</label>
+          <select id="type">
+            <option value="long_running">长期执行</option>
+            <option value="one_shot">执行完即关闭</option>
+          </select>
+        </div>
+        <div>
+          <label>Cron 表达式 (含秒)</label>
+          <input id="cronExpr" placeholder="*/30 * * * * *" />
+        </div>
+      </div>
+
+      <div class="inline">
+        <input id="enabled" type="checkbox" checked /> <span>添加后立即启用（绿标）</span>
+      </div>
+      <div class="inline">
+        <input id="killPreviousOnRun" type="checkbox" /> <span>长期任务 Cron 触发时先终止旧任务</span>
+      </div>
+
+      <label>任务级环境变量（每行 KEY=VALUE）</label>
+      <textarea id="taskEnv" placeholder="HTTP_PROXY=http://127.0.0.1:7890"></textarea>
+
+      <div class="row" style="margin-top:10px;">
+        <button id="saveTaskBtn">保存任务</button>
+        <button id="resetTaskBtn" class="alt">清空表单</button>
+      </div>
+
+      <hr style="border:none; border-top:1px solid var(--line); margin:14px 0;" />
+
+      <h2>全局环境变量</h2>
+      <label>全局环境变量（每行 KEY=VALUE）</label>
+      <textarea id="globalEnv"></textarea>
+      <button id="saveEnvBtn">保存全局环境变量</button>
+      <p id="tip" class="muted"></p>
+    </section>
+
+    <section class="main">
+      <section class="card">
+        <h2>任务列表</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th>
+              <th>名称</th>
+              <th>命令</th>
+              <th>类型</th>
+              <th>Cron</th>
+              <th>下次执行</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="taskRows"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>日志查看</h2>
+        <div class="row">
+          <div>
+            <label>当前任务 ID</label>
+            <input id="logTaskId" readonly />
+          </div>
+          <div>
+            <label>日志偏移量</label>
+            <input id="logOffset" readonly />
+          </div>
+        </div>
+        <textarea id="logPanel" readonly></textarea>
+      </section>
+    </section>
+  </div>
+
+<script>
+const state = {
+  tasks: [],
+  logTaskId: "",
+  logOffset: 0,
+  polling: null,
+};
+
+function envToText(env) {
+  return Object.keys(env || {}).sort().map(function(k) { return k + "=" + env[k]; }).join("\n");
+}
+
+function parseEnvText(text) {
+  const out = {};
+  (text || "").split(/\r?\n/).forEach(line => {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) return;
+    const idx = t.indexOf("=");
+    if (idx <= 0) return;
+    const key = t.slice(0, idx).trim();
+    const val = t.slice(idx + 1).trim();
+    if (!key) return;
+    out[key] = val;
+  });
+  return out;
+}
+
+function statusDot(item) {
+  if (item.state.running) return ["green", "运行中"];
+  if (!item.task.enabled) return ["gray", "未启用"];
+  if (item.state.status === "success" || item.state.status === "idle") return ["green", item.state.status];
+  if (item.state.status === "failed") return ["red", "失败"];
+  if (item.state.status === "skipped") return ["amber", "跳过"];
+  if (item.state.status === "invalid_cron") return ["red", "Cron 错误"];
+  return ["amber", item.state.status || "未知"];
+}
+
+function fmtTime(raw) {
+  if (!raw) return "-";
+  try { return new Date(raw).toLocaleString(); } catch { return raw; }
+}
+
+function msg(text, ok = true) {
+  const tip = document.getElementById("tip");
+  tip.className = ok ? "ok" : "err";
+  tip.textContent = text;
+  setTimeout(() => { tip.textContent = ""; tip.className = "muted"; }, 3200);
+}
+
+async function refreshState() {
+  const res = await fetch('/api/state');
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  state.tasks = data.tasks || [];
+  document.getElementById("globalEnv").value = envToText(data.globalEnv || {});
+  renderTasks();
+}
+
+function renderTasks() {
+  const tbody = document.getElementById("taskRows");
+  tbody.innerHTML = "";
+  for (const item of state.tasks) {
+    const tr = document.createElement("tr");
+    const [dot, label] = statusDot(item);
+    tr.innerHTML =
+      "<td><span class=\"status\"><span class=\"dot " + dot + "\"></span>" + label + "</span></td>" +
+      "<td>" + item.task.name + "</td>" +
+      "<td><code>" + item.task.command.replace(/</g, '&lt;') + "</code></td>" +
+      "<td>" + (item.task.type === 'long_running' ? '长期' : '一次性') + "</td>" +
+      "<td>" + (item.task.cronExpr || '-') + "</td>" +
+      "<td>" + fmtTime(item.state.nextRun) + "</td>" +
+      "<td><div class=\"actions\">" +
+      "<button data-a=\"edit\" data-id=\"" + item.task.id + "\" class=\"alt\">编辑</button>" +
+      "<button data-a=\"toggle\" data-id=\"" + item.task.id + "\" class=\"alt\">" + (item.task.enabled ? '停用' : '启用') + "</button>" +
+      "<button data-a=\"run\" data-id=\"" + item.task.id + "\">执行</button>" +
+      "<button data-a=\"stop\" data-id=\"" + item.task.id + "\" class=\"alt\">停止</button>" +
+      "<button data-a=\"log\" data-id=\"" + item.task.id + "\" class=\"alt\">日志</button>" +
+      "<button data-a=\"del\" data-id=\"" + item.task.id + "\" class=\"danger\">删除</button>" +
+      "</div></td>";
+    tbody.appendChild(tr);
+  }
+}
+
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {} };
+  if (body !== null) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(await res.text());
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function fillTaskForm(item) {
+  document.getElementById("taskFormTitle").textContent = "编辑任务";
+  document.getElementById("taskId").value = item.task.id;
+  document.getElementById("name").value = item.task.name;
+  document.getElementById("command").value = item.task.command;
+  document.getElementById("type").value = item.task.type;
+  document.getElementById("enabled").checked = !!item.task.enabled;
+  document.getElementById("cronExpr").value = item.task.cronExpr || "";
+  document.getElementById("killPreviousOnRun").checked = !!item.task.killPreviousOnRun;
+  document.getElementById("taskEnv").value = envToText(item.task.env || {});
+}
+
+function clearTaskForm() {
+  document.getElementById("taskFormTitle").textContent = "新增任务";
+  document.getElementById("taskId").value = "";
+  document.getElementById("name").value = "";
+  document.getElementById("command").value = "";
+  document.getElementById("type").value = "long_running";
+  document.getElementById("enabled").checked = true;
+  document.getElementById("cronExpr").value = "";
+  document.getElementById("killPreviousOnRun").checked = false;
+  document.getElementById("taskEnv").value = "";
+}
+
+async function saveTask() {
+  const payload = {
+    name: document.getElementById("name").value,
+    command: document.getElementById("command").value,
+    type: document.getElementById("type").value,
+    enabled: document.getElementById("enabled").checked,
+    cronExpr: document.getElementById("cronExpr").value,
+    killPreviousOnRun: document.getElementById("killPreviousOnRun").checked,
+    env: parseEnvText(document.getElementById("taskEnv").value),
+  };
+  const id = document.getElementById("taskId").value;
+  if (id) {
+    await api('/api/tasks/' + id, 'PUT', payload);
+    msg('任务已更新');
+  } else {
+    await api('/api/tasks', 'POST', payload);
+    msg('任务已创建');
+  }
+  clearTaskForm();
+  await refreshState();
+}
+
+async function saveGlobalEnv() {
+  const env = parseEnvText(document.getElementById("globalEnv").value);
+  await api('/api/env', 'PUT', { env });
+  msg('全局环境变量已保存');
+  await refreshState();
+}
+
+async function onTaskAction(e) {
+  const btn = e.target.closest('button[data-a]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const action = btn.dataset.a;
+  const item = state.tasks.find(t => t.task.id === id);
+  if (!item) return;
+  try {
+    if (action === 'edit') {
+      fillTaskForm(item);
+      return;
+    }
+    if (action === 'toggle') {
+      await api('/api/tasks/' + id + '/toggle', 'POST', { enabled: !item.task.enabled });
+      msg(!item.task.enabled ? '任务已启用（绿标）' : '任务已停用');
+    } else if (action === 'run') {
+      await api('/api/tasks/' + id + '/run', 'POST', {});
+      msg('已触发执行');
+    } else if (action === 'stop') {
+      await api('/api/tasks/' + id + '/stop', 'POST', {});
+      msg('已发送停止信号');
+    } else if (action === 'del') {
+      if (!confirm('确认删除该任务？')) return;
+      await api('/api/tasks/' + id, 'DELETE');
+      if (state.logTaskId === id) {
+        state.logTaskId = '';
+        state.logOffset = 0;
+        document.getElementById("logTaskId").value = '';
+        document.getElementById("logOffset").value = '0';
+        document.getElementById("logPanel").value = '';
+      }
+      msg('任务已删除');
+    } else if (action === 'log') {
+      state.logTaskId = id;
+      state.logOffset = 0;
+      document.getElementById("logTaskId").value = id;
+      document.getElementById("logOffset").value = '0';
+      document.getElementById("logPanel").value = '';
+      await pollLogs();
+      msg('日志窗口已切换');
+      return;
+    }
+    await refreshState();
+  } catch (err) {
+    msg(String(err), false);
+  }
+}
+
+async function pollLogs() {
+  if (!state.logTaskId) return;
+  try {
+    const data = await api('/api/tasks/' + state.logTaskId + '/logs?offset=' + state.logOffset);
+    if (data.text) {
+      const panel = document.getElementById("logPanel");
+      panel.value += data.text;
+      panel.scrollTop = panel.scrollHeight;
+    }
+    state.logOffset = data.newOffset || state.logOffset;
+    document.getElementById("logOffset").value = String(state.logOffset);
+  } catch (err) {
+    msg(String(err), false);
+  }
+}
+
+document.getElementById('saveTaskBtn').addEventListener('click', () => saveTask().catch(err => msg(String(err), false)));
+document.getElementById('resetTaskBtn').addEventListener('click', clearTaskForm);
+document.getElementById('saveEnvBtn').addEventListener('click', () => saveGlobalEnv().catch(err => msg(String(err), false)));
+document.getElementById('taskRows').addEventListener('click', onTaskAction);
+
+(async function init() {
+  try {
+    await refreshState();
+    const params = new URLSearchParams(location.search);
+    if (params.get('add') === '1') {
+      clearTaskForm();
+      document.getElementById('name').focus();
+    }
+    state.polling = setInterval(async () => {
+      await refreshState();
+      await pollLogs();
+    }, 1000);
+  } catch (err) {
+    msg(String(err), false);
+  }
+})();
+</script>
+</body>
+</html>`
