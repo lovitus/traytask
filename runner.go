@@ -339,6 +339,22 @@ func (m *Manager) ToggleTask(id string, enabled bool) error {
 }
 
 func (m *Manager) StartTask(id string) error {
+	m.mu.Lock()
+	idx := m.findTaskIndexLocked(id)
+	if idx < 0 {
+		m.mu.Unlock()
+		return errors.New("task not found")
+	}
+	task := m.cfg.Tasks[idx]
+	if !task.Enabled {
+		m.mu.Unlock()
+		return errors.New("task is disabled")
+	}
+	if st, ok := m.states[id]; ok && st.Running {
+		m.mu.Unlock()
+		return errors.New("task is already running")
+	}
+	m.mu.Unlock()
 	go m.startTask(id, "manual")
 	return nil
 }
@@ -346,16 +362,18 @@ func (m *Manager) StartTask(id string) error {
 func (m *Manager) StopTask(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	st, ok := m.states[id]
+	if !ok || !st.Running {
+		return errors.New("task is not running")
+	}
 	p, ok := m.procs[id]
 	if !ok {
-		return errors.New("task is not running")
+		return errors.New("cannot stop task process")
 	}
 	if p.cancel != nil {
 		p.cancel()
 	}
-	if st, ok := m.states[id]; ok {
-		st.Status = "stopping"
-	}
+	st.Status = "stopping"
 	m.notify()
 	return nil
 }
@@ -368,9 +386,23 @@ func (m *Manager) runScheduled(taskID string) {
 		return
 	}
 	t := m.cfg.Tasks[idx]
+	running := false
+	if st, ok := m.states[taskID]; ok {
+		running = st.Running
+	}
 	m.mu.RUnlock()
 
 	if !t.Enabled {
+		return
+	}
+	if running {
+		m.logSystem(taskID, "[scheduler] skipped trigger because previous run is still active")
+		m.mu.Lock()
+		if st, ok := m.states[taskID]; ok {
+			st.Status = "skipped"
+		}
+		m.mu.Unlock()
+		m.notify()
 		return
 	}
 	if t.Type == TaskTypeLongRunning {
@@ -443,11 +475,9 @@ func (m *Manager) startTask(id, trigger string) {
 		m.mu.Unlock()
 		return
 	}
-	if task.Type == TaskTypeLongRunning {
-		if _, running := m.procs[id]; running {
-			m.mu.Unlock()
-			return
-		}
+	if _, running := m.procs[id]; running {
+		m.mu.Unlock()
+		return
 	}
 	st := m.states[id]
 	if st == nil {
@@ -489,15 +519,13 @@ func (m *Manager) startTask(id, trigger string) {
 	}
 	runID := newID()
 	proc := &activeProc{cmd: cmd, cancel: cancel, runID: runID, taskID: task.ID, isLongRun: task.Type == TaskTypeLongRunning}
-	if task.Type == TaskTypeLongRunning {
-		m.procs[id] = proc
-	}
+	m.procs[id] = proc
 	m.mu.Unlock()
 
 	m.logSystem(task.ID, fmt.Sprintf("[start] trigger=%s mode=%s command=%q", trigger, execMode, task.Command))
 	if err := cmd.Start(); err != nil {
 		m.mu.Lock()
-		if task.Type == TaskTypeLongRunning {
+		if p, ok := m.procs[id]; ok && p.runID == runID {
 			delete(m.procs, id)
 		}
 		st := m.states[id]
@@ -539,10 +567,8 @@ func (m *Manager) startTask(id, trigger string) {
 	cancel()
 
 	m.mu.Lock()
-	if task.Type == TaskTypeLongRunning {
-		if p, ok := m.procs[id]; ok && p.runID == runID {
-			delete(m.procs, id)
-		}
+	if p, ok := m.procs[id]; ok && p.runID == runID {
+		delete(m.procs, id)
 	}
 	st = m.states[id]
 	if st != nil {

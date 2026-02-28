@@ -364,7 +364,7 @@ const indexHTML = `<!doctype html>
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      white-space: nowrap;
+      white-space: normal;
     }
     .dot {
       width: 10px;
@@ -376,9 +376,32 @@ const indexHTML = `<!doctype html>
     .dot.amber { background: var(--amber); }
     .dot.red { background: var(--red); }
     .dot.gray { background: #7c8a7f; }
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge.on {
+      background: #dff4e5;
+      color: #0f6a30;
+      border: 1px solid #9ed3ad;
+    }
+    .badge.off {
+      background: #eef1ef;
+      color: #4f5a52;
+      border: 1px solid #c4cec7;
+    }
     .actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
     .actions button { padding: 6px 8px; font-size: 12px; }
     .actions .danger { background: #b53a3a; }
+    .actions button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
     #logPanel { min-height: 240px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #0f1e14; color: #bdeecb; }
     .muted { color: var(--muted); font-size: 12px; }
     .ok { color: var(--green); }
@@ -443,15 +466,17 @@ const indexHTML = `<!doctype html>
     <section class="main">
       <section class="card">
         <h2>任务列表</h2>
+        <p class="muted">状态说明：启用/禁用 与 运行状态分开展示；按钮会按当前状态自动可用或禁用。</p>
         <table>
           <thead>
             <tr>
-              <th>状态</th>
-              <th>名称</th>
+              <th>启用</th>
+              <th>运行状态</th>
+              <th>任务</th>
               <th>命令</th>
               <th>类型</th>
-              <th>Cron</th>
-              <th>下次执行</th>
+              <th>Cron / 下次</th>
+              <th>最近结果</th>
               <th>操作</th>
             </tr>
           </thead>
@@ -461,6 +486,7 @@ const indexHTML = `<!doctype html>
 
       <section class="card">
         <h2>日志查看</h2>
+        <p class="muted">每个任务日志仅保留最近 1000 行。</p>
         <div class="row">
           <div>
             <label>当前任务 ID</label>
@@ -504,14 +530,58 @@ function parseEnvText(text) {
   return out;
 }
 
-function statusDot(item) {
-  if (item.state.running) return ["green", "运行中"];
-  if (!item.task.enabled) return ["gray", "未启用"];
-  if (item.state.status === "success" || item.state.status === "idle") return ["green", item.state.status];
-  if (item.state.status === "failed") return ["red", "失败"];
-  if (item.state.status === "skipped") return ["amber", "跳过"];
-  if (item.state.status === "invalid_cron") return ["red", "Cron 错误"];
-  return ["amber", item.state.status || "未知"];
+function esc(v) {
+  return String(v || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function enabledBadge(item) {
+  if (item.task.enabled) return '<span class="badge on">已启用</span>';
+  return '<span class="badge off">已禁用</span>';
+}
+
+function runtimeInfo(item) {
+  if (item.state.running) {
+    const pid = item.state.pid ? (' (PID ' + item.state.pid + ')') : '';
+    return ["green", "运行中" + pid];
+  }
+  switch (item.state.status) {
+    case "disabled": return ["gray", "已禁用"];
+    case "idle": return ["green", "空闲"];
+    case "success": return ["green", "上次成功"];
+    case "failed": return ["red", "上次失败"];
+    case "stopped": return ["amber", "已停止"];
+    case "stopping": return ["amber", "停止中"];
+    case "skipped": return ["amber", "已跳过(上次未结束)"];
+    case "invalid_cron": return ["red", "Cron 配置错误"];
+    default: return ["amber", item.state.status || "未知"];
+  }
+}
+
+function cronAndNext(item) {
+  const cron = item.task.cronExpr ? esc(item.task.cronExpr) : '-';
+  const next = fmtTime(item.state.nextRun);
+  return cron + '<br><span class="muted">下次: ' + esc(next) + '</span>';
+}
+
+function lastResult(item) {
+  if (item.state.running) return '运行中...';
+  if (!item.state.lastRunEnd) return '-';
+  const time = fmtTime(item.state.lastRunEnd);
+  const exit = item.state.lastExitCode;
+  let header = '完成';
+  if (typeof exit === 'number') {
+    header = exit === 0 ? '成功 (exit=0)' : ('失败 (exit=' + exit + ')');
+  }
+  let details = '';
+  if (item.state.lastError) {
+    details = '<br><span class="muted">' + esc(item.state.lastError) + '</span>';
+  }
+  return esc(header) + details + '<br><span class="muted">' + esc(time) + '</span>';
 }
 
 function fmtTime(raw) {
@@ -526,6 +596,17 @@ function msg(text, ok = true) {
   setTimeout(() => { tip.textContent = ""; tip.className = "muted"; }, 3200);
 }
 
+function toUserError(err) {
+  const t = String(err || '');
+  if (t.includes('task not found')) return '任务不存在，可能已被删除';
+  if (t.includes('task is disabled')) return '任务已禁用，请先启用';
+  if (t.includes('task is already running')) return '任务已经在运行中';
+  if (t.includes('task is not running')) return '任务当前未运行';
+  if (t.includes('cannot stop task process')) return '任务进程当前不可停止';
+  if (t.includes('unauthorized')) return '页面授权已失效，请刷新页面';
+  return t;
+}
+
 async function refreshState() {
   const data = await api('/api/state');
   state.tasks = data.tasks || [];
@@ -538,19 +619,26 @@ function renderTasks() {
   tbody.innerHTML = "";
   for (const item of state.tasks) {
     const tr = document.createElement("tr");
-    const [dot, label] = statusDot(item);
+    const [dot, runtime] = runtimeInfo(item);
+    const runDisabled = !item.task.enabled || item.state.running;
+    const stopDisabled = !item.state.running;
+    const runLabel = item.task.type === 'long_running'
+      ? (item.state.running ? '运行中' : '启动')
+      : (item.state.running ? '执行中' : '执行一次');
+    const toggleLabel = item.task.enabled ? '禁用' : '启用';
     tr.innerHTML =
-      "<td><span class=\"status\"><span class=\"dot " + dot + "\"></span>" + label + "</span></td>" +
-      "<td>" + item.task.name + "</td>" +
-      "<td><code>" + item.task.command.replace(/</g, '&lt;') + "</code></td>" +
+      "<td>" + enabledBadge(item) + "</td>" +
+      "<td><span class=\"status\"><span class=\"dot " + dot + "\"></span>" + esc(runtime) + "</span></td>" +
+      "<td>" + esc(item.task.name) + "</td>" +
+      "<td><code>" + esc(item.task.command) + "</code></td>" +
       "<td>" + (item.task.type === 'long_running' ? '长期' : '一次性') + "</td>" +
-      "<td>" + (item.task.cronExpr || '-') + "</td>" +
-      "<td>" + fmtTime(item.state.nextRun) + "</td>" +
+      "<td>" + cronAndNext(item) + "</td>" +
+      "<td>" + lastResult(item) + "</td>" +
       "<td><div class=\"actions\">" +
       "<button data-a=\"edit\" data-id=\"" + item.task.id + "\" class=\"alt\">编辑</button>" +
-      "<button data-a=\"toggle\" data-id=\"" + item.task.id + "\" class=\"alt\">" + (item.task.enabled ? '停用' : '启用') + "</button>" +
-      "<button data-a=\"run\" data-id=\"" + item.task.id + "\">执行</button>" +
-      "<button data-a=\"stop\" data-id=\"" + item.task.id + "\" class=\"alt\">停止</button>" +
+      "<button data-a=\"toggle\" data-id=\"" + item.task.id + "\" class=\"alt\">" + toggleLabel + "</button>" +
+      "<button data-a=\"run\" data-id=\"" + item.task.id + "\" " + (runDisabled ? "disabled" : "") + ">" + runLabel + "</button>" +
+      "<button data-a=\"stop\" data-id=\"" + item.task.id + "\" class=\"alt\" " + (stopDisabled ? "disabled" : "") + ">停止</button>" +
       "<button data-a=\"log\" data-id=\"" + item.task.id + "\" class=\"alt\">日志</button>" +
       "<button data-a=\"del\" data-id=\"" + item.task.id + "\" class=\"danger\">删除</button>" +
       "</div></td>";
@@ -667,7 +755,7 @@ async function onTaskAction(e) {
     }
     await refreshState();
   } catch (err) {
-    msg(String(err), false);
+    msg(toUserError(err), false);
   }
 }
 
@@ -683,13 +771,13 @@ async function pollLogs() {
     state.logOffset = data.newOffset || state.logOffset;
     document.getElementById("logOffset").value = String(state.logOffset);
   } catch (err) {
-    msg(String(err), false);
+    msg(toUserError(err), false);
   }
 }
 
-document.getElementById('saveTaskBtn').addEventListener('click', () => saveTask().catch(err => msg(String(err), false)));
+document.getElementById('saveTaskBtn').addEventListener('click', () => saveTask().catch(err => msg(toUserError(err), false)));
 document.getElementById('resetTaskBtn').addEventListener('click', clearTaskForm);
-document.getElementById('saveEnvBtn').addEventListener('click', () => saveGlobalEnv().catch(err => msg(String(err), false)));
+document.getElementById('saveEnvBtn').addEventListener('click', () => saveGlobalEnv().catch(err => msg(toUserError(err), false)));
 document.getElementById('taskRows').addEventListener('click', onTaskAction);
 
 (async function init() {
@@ -705,7 +793,7 @@ document.getElementById('taskRows').addEventListener('click', onTaskAction);
       await pollLogs();
     }, 1000);
   } catch (err) {
-    msg(String(err), false);
+    msg(toUserError(err), false);
   }
 })();
 </script>
