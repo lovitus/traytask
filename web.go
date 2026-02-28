@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -10,26 +11,38 @@ import (
 )
 
 type Server struct {
-	manager *Manager
-	tmpl    *template.Template
+	manager  *Manager
+	tmpl     *template.Template
+	apiToken string
 }
 
-func NewServer(manager *Manager) (*Server, error) {
+func NewServer(manager *Manager, apiToken string) (*Server, error) {
 	tmpl, err := template.New("index").Parse(indexHTML)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{manager: manager, tmpl: tmpl}, nil
+	return &Server{manager: manager, tmpl: tmpl, apiToken: apiToken}, nil
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
-	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/env", s.handleEnv)
-	mux.HandleFunc("/api/tasks", s.handleTasks)
-	mux.HandleFunc("/api/tasks/", s.handleTaskAction)
+	mux.Handle("/api/state", s.withAPIAuth(http.HandlerFunc(s.handleState)))
+	mux.Handle("/api/env", s.withAPIAuth(http.HandlerFunc(s.handleEnv)))
+	mux.Handle("/api/tasks", s.withAPIAuth(http.HandlerFunc(s.handleTasks)))
+	mux.Handle("/api/tasks/", s.withAPIAuth(http.HandlerFunc(s.handleTaskAction)))
 	return mux
+}
+
+func (s *Server) withAPIAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("X-TrayTask-Token")
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.apiToken)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +50,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	_ = s.tmpl.Execute(w, map[string]string{})
+	_ = s.tmpl.Execute(w, map[string]string{
+		"APIToken": s.apiToken,
+	})
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -462,6 +477,7 @@ const indexHTML = `<!doctype html>
   </div>
 
 <script>
+const API_TOKEN = "{{.APIToken}}";
 const state = {
   tasks: [],
   logTaskId: "",
@@ -511,9 +527,7 @@ function msg(text, ok = true) {
 }
 
 async function refreshState() {
-  const res = await fetch('/api/state');
-  if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
+  const data = await api('/api/state');
   state.tasks = data.tasks || [];
   document.getElementById("globalEnv").value = envToText(data.globalEnv || {});
   renderTasks();
@@ -545,7 +559,7 @@ function renderTasks() {
 }
 
 async function api(path, method='GET', body=null) {
-  const opts = { method, headers: {} };
+  const opts = { method, headers: { 'X-TrayTask-Token': API_TOKEN } };
   if (body !== null) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"strings"
 )
 
 var version = "dev"
@@ -14,6 +17,7 @@ func main() {
 	autoOpen := flag.Bool("open", true, "open dashboard on startup")
 	webEnabled := flag.Bool("web", true, "enable web dashboard")
 	listenAddr := flag.String("listen", "127.0.0.1:0", "dashboard listen address")
+	allowRemote := flag.Bool("allow-remote-web", false, "allow web dashboard to listen on non-loopback addresses")
 	flag.Parse()
 
 	store, err := NewStore()
@@ -28,7 +32,14 @@ func main() {
 	log.Printf("data dir: %s", store.BaseDir())
 	dashboardURL := ""
 	if *webEnabled {
-		server, err := NewServer(manager)
+		if !*allowRemote && !isLoopbackListenAddr(*listenAddr) {
+			log.Fatalf("refusing non-loopback listen addr %q; use -allow-remote-web=true to override", *listenAddr)
+		}
+		apiToken, err := generateAPIToken()
+		if err != nil {
+			log.Fatalf("generate api token: %v", err)
+		}
+		server, err := NewServer(manager, apiToken)
 		if err != nil {
 			log.Fatalf("init web server: %v", err)
 		}
@@ -52,4 +63,30 @@ func main() {
 
 	tray := NewTrayApp(manager, dashboardURL, store.BaseDir())
 	tray.Run()
+}
+
+func generateAPIToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

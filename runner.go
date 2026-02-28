@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/shlex"
 	"github.com/robfig/cron/v3"
 )
 
@@ -463,7 +464,8 @@ func (m *Manager) startTask(id, trigger string) {
 	m.notify()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := shellCommand(ctx, task.Command)
+	cmd, execMode := taskCommand(ctx, task.Command)
+	configureCommandForPlatform(cmd)
 	cmd.Env = mergedEnv(os.Environ(), m.cfg.GlobalEnv, task.Env)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -492,7 +494,7 @@ func (m *Manager) startTask(id, trigger string) {
 	}
 	m.mu.Unlock()
 
-	m.logSystem(task.ID, fmt.Sprintf("[start] trigger=%s command=%q", trigger, task.Command))
+	m.logSystem(task.ID, fmt.Sprintf("[start] trigger=%s mode=%s command=%q", trigger, execMode, task.Command))
 	if err := cmd.Start(); err != nil {
 		m.mu.Lock()
 		if task.Type == TaskTypeLongRunning {
@@ -683,6 +685,59 @@ func shellCommand(ctx context.Context, command string) *exec.Cmd {
 		return exec.CommandContext(ctx, "cmd", "/C", command)
 	}
 	return exec.CommandContext(ctx, "sh", "-c", command)
+}
+
+func taskCommand(ctx context.Context, raw string) (*exec.Cmd, string) {
+	command := strings.TrimSpace(raw)
+	if command == "" {
+		return shellCommand(ctx, raw), "shell-empty"
+	}
+	if needsShellSyntax(command) {
+		return shellCommand(ctx, command), "shell-syntax"
+	}
+	parts, err := shlex.Split(command)
+	if err != nil || len(parts) == 0 {
+		return shellCommand(ctx, command), "shell-parse-fallback"
+	}
+	if runtime.GOOS == "windows" && isWindowsShellBuiltin(parts[0]) {
+		return shellCommand(ctx, command), "shell-builtin"
+	}
+	return exec.CommandContext(ctx, parts[0], parts[1:]...), "direct"
+}
+
+func needsShellSyntax(command string) bool {
+	for _, tok := range []string{"|", "&&", "||", ">", "<", ";", "$(", "`"} {
+		if strings.Contains(command, tok) {
+			return true
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, tok := range []string{"%", "^", "&", ">>", "2>"} {
+			if strings.Contains(command, tok) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isWindowsShellBuiltin(cmd string) bool {
+	name := strings.ToLower(strings.TrimSpace(cmd))
+	if name == "" {
+		return false
+	}
+	// cmd.exe 内建命令必须走 shell 才能执行。
+	builtins := map[string]struct{}{
+		"assoc": {}, "break": {}, "call": {}, "cd": {}, "chcp": {}, "chdir": {}, "cls": {},
+		"color": {}, "copy": {}, "date": {}, "del": {}, "dir": {}, "echo": {}, "endlocal": {},
+		"erase": {}, "exit": {}, "for": {}, "ftype": {}, "goto": {}, "if": {}, "md": {},
+		"mkdir": {}, "mklink": {}, "move": {}, "path": {}, "pause": {}, "popd": {}, "prompt": {},
+		"pushd": {}, "rd": {}, "ren": {}, "rename": {}, "rmdir": {}, "set": {}, "setlocal": {},
+		"shift": {}, "start": {}, "time": {}, "title": {}, "type": {}, "ver": {}, "verify": {},
+		"vol": {},
+	}
+	_, ok := builtins[name]
+	return ok
 }
 
 func (m *Manager) ExportJSON() ([]byte, error) {

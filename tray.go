@@ -24,6 +24,10 @@ func (t *TrayApp) Run() {
 func (t *TrayApp) onReady() {
 	systray.SetTitle("TrayTask")
 	systray.SetTooltip("TrayTask - 托盘任务管理")
+	icon := trayIconBytes()
+	if len(icon) > 0 {
+		systray.SetIcon(icon)
+	}
 
 	var openItem *systray.MenuItem
 	var addItem *systray.MenuItem
