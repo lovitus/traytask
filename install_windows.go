@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -89,6 +90,13 @@ func ensureInstalledAndRelaunch() (bool, error) {
 	if !askYesNo(prompt, "TrayTask") {
 		showInfo("你已取消安装，程序将退出。", "TrayTask")
 		return true, nil
+	}
+
+	if targetExists {
+		if ok := requestExistingInstanceExitAndWait(12 * time.Second); !ok {
+			showInfo("检测到旧版本仍在运行，自动退出超时。请先退出托盘进程后重试更新。", "TrayTask 更新失败")
+			return true, nil
+		}
 	}
 
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
