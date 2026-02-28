@@ -33,6 +33,14 @@ func main() {
 	if exitNow {
 		return
 	}
+	alreadyRunning, err := ensureSingleInstance()
+	if err != nil {
+		log.Printf("single instance warning: %v", err)
+	}
+	if alreadyRunning {
+		return
+	}
+	defer releaseSingleInstance()
 
 	store, err := NewStore()
 	if err != nil {

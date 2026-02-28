@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Server struct {
@@ -31,18 +33,26 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/env", s.withAPIAuth(http.HandlerFunc(s.handleEnv)))
 	mux.Handle("/api/tasks", s.withAPIAuth(http.HandlerFunc(s.handleTasks)))
 	mux.Handle("/api/tasks/", s.withAPIAuth(http.HandlerFunc(s.handleTaskAction)))
+	mux.Handle("/api/events", s.withAPIAuth(http.HandlerFunc(s.handleEvents)))
 	return mux
 }
 
 func (s *Server) withAPIAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("X-TrayTask-Token")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.apiToken)) != 1 {
+		if !s.isAuthorized(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) isAuthorized(r *http.Request) bool {
+	token := r.Header.Get("X-TrayTask-Token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.apiToken)) == 1
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +217,57 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		http.Error(w, fmt.Sprintf("unknown action: %s", action), http.StatusNotFound)
+	}
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "stream unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	writeEvent := func(data string) error {
+		if _, err := io.WriteString(w, "data: "+data+"\n\n"); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+	writePing := func() error {
+		if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	if err := writeEvent("ready"); err != nil {
+		return
+	}
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-s.manager.NotifyChannel():
+			if err := writeEvent("update"); err != nil {
+				return
+			}
+		case <-heartbeat.C:
+			if err := writePing(); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -509,6 +570,7 @@ const state = {
   logTaskId: "",
   logOffset: 0,
   polling: null,
+  events: null,
 };
 
 function envToText(env) {
@@ -550,6 +612,7 @@ function runtimeInfo(item) {
     return ["green", "运行中" + pid];
   }
   switch (item.state.status) {
+    case "starting": return ["amber", "启动中"];
     case "disabled": return ["gray", "已禁用"];
     case "idle": return ["green", "空闲"];
     case "success": return ["green", "上次成功"];
@@ -647,7 +710,7 @@ function renderTasks() {
 }
 
 async function api(path, method='GET', body=null) {
-  const opts = { method, headers: { 'X-TrayTask-Token': API_TOKEN } };
+  const opts = { method, headers: { 'X-TrayTask-Token': API_TOKEN }, cache: 'no-store' };
   if (body !== null) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -714,6 +777,7 @@ async function saveGlobalEnv() {
 async function onTaskAction(e) {
   const btn = e.target.closest('button[data-a]');
   if (!btn) return;
+  if (btn.disabled) return;
   const id = btn.dataset.id;
   const action = btn.dataset.a;
   const item = state.tasks.find(t => t.task.id === id);
@@ -724,15 +788,19 @@ async function onTaskAction(e) {
       return;
     }
     if (action === 'toggle') {
+      btn.disabled = true;
       await api('/api/tasks/' + id + '/toggle', 'POST', { enabled: !item.task.enabled });
       msg(!item.task.enabled ? '任务已启用（绿标）' : '任务已停用');
     } else if (action === 'run') {
+      btn.disabled = true;
       await api('/api/tasks/' + id + '/run', 'POST', {});
       msg('已触发执行');
     } else if (action === 'stop') {
+      btn.disabled = true;
       await api('/api/tasks/' + id + '/stop', 'POST', {});
       msg('已发送停止信号');
     } else if (action === 'del') {
+      btn.disabled = true;
       if (!confirm('确认删除该任务？')) return;
       await api('/api/tasks/' + id, 'DELETE');
       if (state.logTaskId === id) {
@@ -756,6 +824,9 @@ async function onTaskAction(e) {
     await refreshState();
   } catch (err) {
     msg(toUserError(err), false);
+  } finally {
+    btn.disabled = false;
+    refreshState().catch(() => {});
   }
 }
 
@@ -780,18 +851,37 @@ document.getElementById('resetTaskBtn').addEventListener('click', clearTaskForm)
 document.getElementById('saveEnvBtn').addEventListener('click', () => saveGlobalEnv().catch(err => msg(toUserError(err), false)));
 document.getElementById('taskRows').addEventListener('click', onTaskAction);
 
+function connectEvents() {
+  if (state.events) {
+    try { state.events.close(); } catch {}
+  }
+  const url = '/api/events?token=' + encodeURIComponent(API_TOKEN);
+  const es = new EventSource(url);
+  es.onmessage = () => {
+    refreshState().catch(() => {});
+  };
+  es.onerror = () => {
+    try { es.close(); } catch {}
+    setTimeout(connectEvents, 2000);
+  };
+  state.events = es;
+}
+
 (async function init() {
   try {
     await refreshState();
+    connectEvents();
     const params = new URLSearchParams(location.search);
     if (params.get('add') === '1') {
       clearTaskForm();
       document.getElementById('name').focus();
     }
     state.polling = setInterval(async () => {
-      await refreshState();
       await pollLogs();
     }, 1000);
+    setInterval(() => {
+      refreshState().catch(() => {});
+    }, 10000);
   } catch (err) {
     msg(toUserError(err), false);
   }

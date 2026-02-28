@@ -354,7 +354,20 @@ func (m *Manager) StartTask(id string) error {
 		m.mu.Unlock()
 		return errors.New("task is already running")
 	}
+	st := m.states[id]
+	if st == nil {
+		st = &taskState{TaskRuntimeState: TaskRuntimeState{TaskID: id, Enabled: task.Enabled}}
+		m.states[id] = st
+	}
+	now := time.Now()
+	st.Running = true
+	st.Status = "starting"
+	st.LastRunStart = &now
+	st.LastRunEnd = nil
+	st.LastError = ""
+	st.LastExitCode = nil
 	m.mu.Unlock()
+	m.notify()
 	go m.startTask(id, "manual")
 	return nil
 }
