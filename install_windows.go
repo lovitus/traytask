@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,13 @@ func ensureInstalledAndRelaunch() (bool, error) {
 	targetExists := fileExists(targetExe)
 	installedVersion := ""
 	if targetExists {
+		sameHash, err := sameBinaryHash(exe, targetExe)
+		if err == nil && sameHash {
+			if err := relaunchFromInstalledExe(targetExe); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
 		v, err := queryBinaryVersion(targetExe)
 		if err == nil {
 			installedVersion = v
@@ -148,6 +156,35 @@ func fileExists(path string) bool {
 func isCLIExecutableName(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.Contains(lower, "-cli") || strings.Contains(lower, "_cli")
+}
+
+func sameBinaryHash(a, b string) (bool, error) {
+	ha, err := fileSHA256(a)
+	if err != nil {
+		return false, err
+	}
+	hb, err := fileSHA256(b)
+	if err != nil {
+		return false, err
+	}
+	return ha == hb, nil
+}
+
+func fileSHA256(path string) ([32]byte, error) {
+	var zero [32]byte
+	f, err := os.Open(path)
+	if err != nil {
+		return zero, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return zero, err
+	}
+	sum := h.Sum(nil)
+	var out [32]byte
+	copy(out[:], sum)
+	return out, nil
 }
 
 func copyFile(src, dst string) error {
