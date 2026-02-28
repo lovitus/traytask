@@ -42,6 +42,9 @@ go run .
 - Windows：下载 Release 里的 `traytask-windows-amd64.zip`，压缩包内有两个可执行文件：
   - `traytask-windows-amd64.exe`：双击启动（不弹黑色命令行窗口）
   - `traytask-cli-windows-amd64.exe`：命令行启动（保留控制台）
+  - 首次从任意目录运行时，程序会提示安装到固定目录（`%LOCALAPPDATA%\TrayTask`），之后自动从该目录启动
+  - 安装后会生成 `add_defender_whitelist.bat`，请右键“以管理员身份运行”添加 Defender 白名单
+  - 若使用第三方安全软件，需要手动把安装目录加入白名单
 - Linux/macOS：把二进制放到可执行位置后可在文件管理器双击启动（需有执行权限）。
 
 可选参数：

@@ -20,6 +20,14 @@ func main() {
 	allowRemote := flag.Bool("allow-remote-web", false, "allow web dashboard to listen on non-loopback addresses")
 	flag.Parse()
 
+	exitNow, err := ensureInstalledAndRelaunch()
+	if err != nil {
+		log.Printf("install bootstrap warning: %v", err)
+	}
+	if exitNow {
+		return
+	}
+
 	store, err := NewStore()
 	if err != nil {
 		log.Fatalf("init store: %v", err)
