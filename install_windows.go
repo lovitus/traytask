@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -21,9 +22,15 @@ const (
 	msgBoxIconQuestion = 0x00000020
 	msgBoxDefaultBtn2  = 0x00000100
 	msgBoxResultYes    = 6
+
+	envSkipInstallBootstrap = "TRAYTASK_SKIP_INSTALL_CHECK"
 )
 
 func ensureInstalledAndRelaunch() (bool, error) {
+	if os.Getenv(envSkipInstallBootstrap) == "1" {
+		return false, nil
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return false, err
@@ -44,8 +51,34 @@ func ensureInstalledAndRelaunch() (bool, error) {
 		return false, nil
 	}
 
-	prompt := "TrayTask 将先安装到本地固定目录后再启动：\n" + installDir + "\n\n是否继续？"
-	if !askYesNo(prompt, "TrayTask 安装") {
+	targetExists := fileExists(targetExe)
+	installedVersion := ""
+	if targetExists {
+		v, err := queryBinaryVersion(targetExe)
+		if err == nil {
+			installedVersion = v
+			if v == version {
+				if err := relaunchFromInstalledExe(targetExe); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	action := "安装"
+	if targetExists {
+		action = "更新安装"
+	}
+	prompt := "检测到当前运行目录不是安装目录。\n将" + action + "到：\n" + installDir
+	if targetExists {
+		if installedVersion == "" {
+			installedVersion = "未知"
+		}
+		prompt += "\n\n已安装版本：" + installedVersion + "\n当前版本：" + version
+	}
+	prompt += "\n\n是否继续？"
+	if !askYesNo(prompt, "TrayTask") {
 		showInfo("你已取消安装，程序将退出。", "TrayTask")
 		return true, nil
 	}
@@ -59,13 +92,14 @@ func ensureInstalledAndRelaunch() (bool, error) {
 	if err := writeDefenderWhitelistBat(installDir); err != nil {
 		return true, err
 	}
+	_ = openPath(installDir)
 
 	if err := relaunchFromInstalledExe(targetExe); err != nil {
 		return true, err
 	}
 
 	showInfo(
-		"已从安装目录启动。\n\n请右键以管理员身份运行：\n"+filepath.Join(installDir, "add_defender_whitelist.bat")+"\n\n如果你使用第三方安全软件，也需要手动把该目录加入白名单。",
+		"已从安装目录启动。\n\n请右键以管理员身份运行：\n"+filepath.Join(installDir, "add_defender_whitelist.bat")+"\n\n目录已自动打开；若使用第三方安全软件，也请手动加白该目录。",
 		"TrayTask 安装完成",
 	)
 	return true, nil
@@ -83,6 +117,17 @@ func trayTaskInstallDir() (string, error) {
 	return filepath.Join(base, "TrayTask"), nil
 }
 
+func queryBinaryVersion(exePath string) (string, error) {
+	cmd := exec.Command(exePath, "-internal-print-version")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windowsCreateNoWindow}
+	cmd.Env = append(os.Environ(), envSkipInstallBootstrap+"=1")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(bytes.TrimSpace(out))), nil
+}
+
 func relaunchFromInstalledExe(targetExe string) error {
 	cmd := exec.Command(targetExe, os.Args[1:]...)
 	cmd.Dir = filepath.Dir(targetExe)
@@ -93,6 +138,11 @@ func relaunchFromInstalledExe(targetExe string) error {
 		}
 	}
 	return cmd.Start()
+}
+
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
 }
 
 func isCLIExecutableName(name string) bool {

@@ -18,7 +18,13 @@ func main() {
 	webEnabled := flag.Bool("web", true, "enable web dashboard")
 	listenAddr := flag.String("listen", "127.0.0.1:0", "dashboard listen address")
 	allowRemote := flag.Bool("allow-remote-web", false, "allow web dashboard to listen on non-loopback addresses")
+	internalPrintVersion := flag.Bool("internal-print-version", false, "internal use only")
 	flag.Parse()
+
+	if *internalPrintVersion {
+		fmt.Print(version)
+		return
+	}
 
 	exitNow, err := ensureInstalledAndRelaunch()
 	if err != nil {
@@ -69,7 +75,7 @@ func main() {
 		log.Printf("dashboard: disabled (-web=false)")
 	}
 
-	tray := NewTrayApp(manager, dashboardURL, store.BaseDir())
+	tray := NewTrayApp(manager, dashboardURL, store.BaseDir(), installedAppDirForUI())
 	tray.Run()
 }
 

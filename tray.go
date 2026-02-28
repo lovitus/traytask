@@ -8,13 +8,14 @@ import (
 )
 
 type TrayApp struct {
-	manager   *Manager
-	dashboard string
-	dataDir   string
+	manager    *Manager
+	dashboard  string
+	dataDir    string
+	installDir string
 }
 
-func NewTrayApp(manager *Manager, dashboard, dataDir string) *TrayApp {
-	return &TrayApp{manager: manager, dashboard: dashboard, dataDir: dataDir}
+func NewTrayApp(manager *Manager, dashboard, dataDir, installDir string) *TrayApp {
+	return &TrayApp{manager: manager, dashboard: dashboard, dataDir: dataDir, installDir: installDir}
 }
 
 func (t *TrayApp) Run() {
@@ -39,6 +40,10 @@ func (t *TrayApp) onReady() {
 		disabled.Disable()
 	}
 	openDirItem := systray.AddMenuItem("打开数据目录", "Open TrayTask data directory")
+	var openInstallDirItem *systray.MenuItem
+	if t.installDir != "" {
+		openInstallDirItem = systray.AddMenuItem("打开安装目录(白名单脚本)", "Open install directory containing whitelist script")
+	}
 	systray.AddSeparator()
 	statusItem := systray.AddMenuItem("运行概览: 加载中...", "Task summary")
 	statusItem.Disable()
@@ -50,6 +55,10 @@ func (t *TrayApp) onReady() {
 			select {
 			case <-openDirItem.ClickedCh:
 				_ = openPath(t.dataDir)
+			case <-clickedCh(openInstallDirItem):
+				if t.installDir != "" {
+					_ = openPath(t.installDir)
+				}
 			case <-clickedCh(openItem):
 				if t.dashboard != "" {
 					_ = openBrowser(t.dashboard)
