@@ -833,13 +833,23 @@ async function onTaskAction(e) {
 async function pollLogs() {
   if (!state.logTaskId) return;
   try {
+    const prevOffset = state.logOffset;
     const data = await api('/api/tasks/' + state.logTaskId + '/logs?offset=' + state.logOffset);
-    if (data.text) {
-      const panel = document.getElementById("logPanel");
-      panel.value += data.text;
-      panel.scrollTop = panel.scrollHeight;
+    const panel = document.getElementById("logPanel");
+    const nextOffset = Number.isFinite(data.newOffset) ? data.newOffset : state.logOffset;
+    const resetPanel = nextOffset < prevOffset;
+    if (resetPanel) {
+      panel.value = '';
     }
-    state.logOffset = data.newOffset || state.logOffset;
+    if (data.text) {
+      panel.value += data.text;
+    }
+    const lines = panel.value.split(/\r?\n/);
+    if (lines.length > 1000) {
+      panel.value = lines.slice(lines.length - 1000).join('\n');
+    }
+    panel.scrollTop = panel.scrollHeight;
+    state.logOffset = nextOffset;
     document.getElementById("logOffset").value = String(state.logOffset);
   } catch (err) {
     msg(toUserError(err), false);
