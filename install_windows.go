@@ -15,13 +15,12 @@ import (
 )
 
 const (
-	msgBoxOK              = 0x00000000
-	msgBoxYesNo           = 0x00000004
-	msgBoxIconInfo        = 0x00000040
-	msgBoxIconQuestion    = 0x00000020
-	msgBoxDefaultBtn2     = 0x00000100
-	msgBoxResultYes       = 6
-	windowsCreateNoWindow = 0x08000000
+	msgBoxOK           = 0x00000000
+	msgBoxYesNo        = 0x00000004
+	msgBoxIconInfo     = 0x00000040
+	msgBoxIconQuestion = 0x00000020
+	msgBoxDefaultBtn2  = 0x00000100
+	msgBoxResultYes    = 6
 )
 
 func ensureInstalledAndRelaunch() (bool, error) {
