@@ -831,3 +831,22 @@ func (m *Manager) ReadTaskLogs(taskID string, offset int64, limit int64) (string
 	eof := newOffset >= size
 	return buf.String(), newOffset, eof, nil
 }
+
+func (m *Manager) ClearTaskLogs(taskID string) error {
+	m.mu.RLock()
+	idx := m.findTaskIndexLocked(taskID)
+	m.mu.RUnlock()
+	if idx < 0 {
+		return errors.New("task not found")
+	}
+
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+
+	path := m.store.TaskLogPath(taskID)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}

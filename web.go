@@ -215,6 +215,16 @@ func (s *Server) handleTaskAction(w http.ResponseWriter, r *http.Request) {
 			"newOffset": newOffset,
 			"eof":       eof,
 		})
+	case "clearlogs":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.manager.ClearTaskLogs(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sendJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		http.Error(w, fmt.Sprintf("unknown action: %s", action), http.StatusNotFound)
 	}
@@ -703,6 +713,7 @@ function renderTasks() {
       "<button data-a=\"run\" data-id=\"" + item.task.id + "\" " + (runDisabled ? "disabled" : "") + ">" + runLabel + "</button>" +
       "<button data-a=\"stop\" data-id=\"" + item.task.id + "\" class=\"alt\" " + (stopDisabled ? "disabled" : "") + ">停止</button>" +
       "<button data-a=\"log\" data-id=\"" + item.task.id + "\" class=\"alt\">日志</button>" +
+      "<button data-a=\"clearlog\" data-id=\"" + item.task.id + "\" class=\"alt\">清空日志</button>" +
       "<button data-a=\"del\" data-id=\"" + item.task.id + "\" class=\"danger\">删除</button>" +
       "</div></td>";
     tbody.appendChild(tr);
@@ -820,6 +831,16 @@ async function onTaskAction(e) {
       await pollLogs();
       msg('日志窗口已切换');
       return;
+    } else if (action === 'clearlog') {
+      btn.disabled = true;
+      if (!confirm('确认清空该任务的日志？')) return;
+      await api('/api/tasks/' + id + '/clearlogs', 'POST', {});
+      if (state.logTaskId === id) {
+        state.logOffset = 0;
+        document.getElementById("logOffset").value = '0';
+        document.getElementById("logPanel").value = '';
+      }
+      msg('日志已清空');
     }
     await refreshState();
   } catch (err) {
