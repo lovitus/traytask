@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,6 +32,16 @@ type taskState struct {
 	TaskRuntimeState
 }
 
+type logEntry struct {
+	seq  int64
+	line string
+}
+
+type taskLogBuffer struct {
+	nextSeq int64
+	entries []logEntry
+}
+
 type Manager struct {
 	mu       sync.RWMutex
 	logMu    sync.Mutex
@@ -42,6 +51,7 @@ type Manager struct {
 	entries  map[string]cron.EntryID
 	states   map[string]*taskState
 	procs    map[string]*activeProc
+	logs     map[string]*taskLogBuffer
 	notifyCh chan struct{}
 }
 
@@ -59,6 +69,7 @@ func NewManager(store *Store) (*Manager, error) {
 		entries:  map[string]cron.EntryID{},
 		states:   map[string]*taskState{},
 		procs:    map[string]*activeProc{},
+		logs:     map[string]*taskLogBuffer{},
 		notifyCh: make(chan struct{}, 1),
 	}
 	for _, t := range cfg.Tasks {
@@ -68,6 +79,7 @@ func NewManager(store *Store) (*Manager, error) {
 			Status:  disabledOrIdle(t.Enabled),
 			Running: false,
 		}}
+		m.logs[t.ID] = &taskLogBuffer{}
 	}
 	m.cron.Start()
 	m.mu.Lock()
@@ -267,6 +279,11 @@ func (m *Manager) UpsertTask(input Task, isNew bool) (Task, error) {
 			Enabled: input.Enabled,
 			Status:  disabledOrIdle(input.Enabled),
 		}}
+		m.logMu.Lock()
+		if _, ok := m.logs[input.ID]; !ok {
+			m.logs[input.ID] = &taskLogBuffer{}
+		}
+		m.logMu.Unlock()
 	} else {
 		idx := m.findTaskIndexLocked(input.ID)
 		if idx < 0 {
@@ -310,8 +327,10 @@ func (m *Manager) DeleteTask(id string) error {
 	}
 	delete(m.procs, id)
 	delete(m.states, id)
+	m.logMu.Lock()
+	delete(m.logs, id)
+	m.logMu.Unlock()
 	m.cfg.Tasks = append(m.cfg.Tasks[:idx], m.cfg.Tasks[idx+1:]...)
-	_ = os.Remove(m.store.TaskLogPath(id))
 	if err := m.persistLocked(); err != nil {
 		return err
 	}
@@ -642,43 +661,27 @@ func (m *Manager) logLine(taskID, stream, line string) {
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
 
-	path := m.store.TaskLogPath(taskID)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
+	buf := m.logs[taskID]
+	if buf == nil {
+		buf = &taskLogBuffer{}
+		m.logs[taskID] = buf
 	}
 	ts := time.Now().Format(time.RFC3339)
-	_, _ = f.WriteString(fmt.Sprintf("%s [%s] %s\n", ts, stream, line))
-	_ = f.Close()
-	_ = trimLogFileToLastNLines(path, maxLogLinesPerTask)
-}
-
-func trimLogFileToLastNLines(path string, keep int) error {
-	if keep <= 0 {
-		return os.WriteFile(path, []byte{}, 0o644)
+	buf.entries = append(buf.entries, logEntry{
+		seq:  buf.nextSeq,
+		line: fmt.Sprintf("%s [%s] %s\n", ts, stream, line),
+	})
+	buf.nextSeq++
+	if len(buf.entries) > maxLogLinesPerTask {
+		buf.entries = append([]logEntry(nil), buf.entries[len(buf.entries)-maxLogLinesPerTask:]...)
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+	// Keep API cursor in a safe range for long-lived processes.
+	if buf.nextSeq > 1_000_000_000_000 {
+		for i := range buf.entries {
+			buf.entries[i].seq = int64(i)
 		}
-		return err
+		buf.nextSeq = int64(len(buf.entries))
 	}
-	if len(b) == 0 {
-		return nil
-	}
-	trimmed := bytes.TrimRight(b, "\n")
-	if len(trimmed) == 0 {
-		return nil
-	}
-	lines := bytes.Split(trimmed, []byte("\n"))
-	if len(lines) <= keep {
-		return nil
-	}
-	lines = lines[len(lines)-keep:]
-	out := bytes.Join(lines, []byte("\n"))
-	out = append(out, '\n')
-	return os.WriteFile(path, out, 0o644)
 }
 
 func (m *Manager) mergedConfigLocked() AppConfig {
@@ -802,34 +805,31 @@ func (m *Manager) ReadTaskLogs(taskID string, offset int64, limit int64) (string
 	if limit <= 0 {
 		limit = 256 * 1024
 	}
-	path := m.store.TaskLogPath(taskID)
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", 0, true, nil
+	buf := m.logs[taskID]
+	if buf == nil || len(buf.entries) == 0 {
+		return "", 0, true, nil
+	}
+
+	firstSeq := buf.nextSeq - int64(len(buf.entries))
+	if offset < firstSeq || offset > buf.nextSeq {
+		offset = firstSeq
+	}
+
+	maxBytes := int(limit)
+	var out strings.Builder
+	newOffset := offset
+	for _, entry := range buf.entries {
+		if entry.seq < offset {
+			continue
 		}
-		return "", 0, false, err
+		if out.Len() > 0 && out.Len()+len(entry.line) > maxBytes {
+			break
+		}
+		out.WriteString(entry.line)
+		newOffset = entry.seq + 1
 	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return "", 0, false, err
-	}
-	size := fi.Size()
-	if offset > size {
-		offset = 0
-	}
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return "", size, false, err
-	}
-	buf := bytes.NewBuffer(nil)
-	_, err = io.CopyN(buf, f, limit)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", size, false, err
-	}
-	newOffset := offset + int64(buf.Len())
-	eof := newOffset >= size
-	return buf.String(), newOffset, eof, nil
+	eof := newOffset >= buf.nextSeq
+	return out.String(), newOffset, eof, nil
 }
 
 func (m *Manager) ClearTaskLogs(taskID string) error {
@@ -842,11 +842,6 @@ func (m *Manager) ClearTaskLogs(taskID string) error {
 
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
-
-	path := m.store.TaskLogPath(taskID)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	return f.Close()
+	m.logs[taskID] = &taskLogBuffer{}
+	return nil
 }

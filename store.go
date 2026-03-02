@@ -12,7 +12,6 @@ type Store struct {
 	mu      sync.Mutex
 	baseDir string
 	cfgPath string
-	logsDir string
 }
 
 func NewStore() (*Store, error) {
@@ -23,14 +22,9 @@ func NewStore() (*Store, error) {
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, err
 	}
-	logsDir := filepath.Join(baseDir, "logs")
-	if err := os.MkdirAll(logsDir, 0o755); err != nil {
-		return nil, err
-	}
 	return &Store{
 		baseDir: baseDir,
 		cfgPath: filepath.Join(baseDir, "config.json"),
-		logsDir: logsDir,
 	}, nil
 }
 
@@ -97,10 +91,6 @@ func (s *Store) Save(cfg AppConfig) error {
 		return err
 	}
 	return os.Rename(tmp, s.cfgPath)
-}
-
-func (s *Store) TaskLogPath(taskID string) string {
-	return filepath.Join(s.logsDir, taskID+".log")
 }
 
 func (s *Store) BaseDir() string {

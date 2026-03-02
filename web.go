@@ -465,9 +465,15 @@ const indexHTML = `<!doctype html>
       color: #4f5a52;
       border: 1px solid #c4cec7;
     }
-    .actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+    .actions { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 6px; max-width: 720px; }
     .actions button { padding: 6px 8px; font-size: 12px; }
     .actions .danger { background: #b53a3a; }
+    .task-actions-row td {
+      padding-top: 0;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .task-main-row td { border-bottom: 0; }
     .actions button:disabled {
       opacity: 0.5;
       cursor: not-allowed;
@@ -479,6 +485,7 @@ const indexHTML = `<!doctype html>
     .err { color: var(--red); }
     @media (max-width: 980px) {
       .wrap { grid-template-columns: 1fr; }
+      .actions { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
     }
   </style>
 </head>
@@ -537,7 +544,7 @@ const indexHTML = `<!doctype html>
     <section class="main">
       <section class="card">
         <h2>任务列表</h2>
-        <p class="muted">状态说明：启用/禁用 与 运行状态分开展示；按钮会按当前状态自动可用或禁用。</p>
+        <p class="muted">状态说明：启用/禁用 与 运行状态分开展示；按钮文案会显示“动作(当前状态)”，并按状态自动可用或禁用。</p>
         <table>
           <thead>
             <tr>
@@ -548,7 +555,6 @@ const indexHTML = `<!doctype html>
               <th>类型</th>
               <th>Cron / 下次</th>
               <th>最近结果</th>
-              <th>操作</th>
             </tr>
           </thead>
           <tbody id="taskRows"></tbody>
@@ -557,14 +563,14 @@ const indexHTML = `<!doctype html>
 
       <section class="card">
         <h2>日志查看</h2>
-        <p class="muted">每个任务日志仅保留最近 1000 行。</p>
+        <p class="muted">每个任务日志仅保留最近 1000 行（仅内存，不落盘）。</p>
         <div class="row">
           <div>
             <label>当前任务 ID</label>
             <input id="logTaskId" readonly />
           </div>
           <div>
-            <label>日志偏移量</label>
+            <label>日志游标（自动）</label>
             <input id="logOffset" readonly />
           </div>
         </div>
@@ -692,13 +698,16 @@ function renderTasks() {
   tbody.innerHTML = "";
   for (const item of state.tasks) {
     const tr = document.createElement("tr");
+    tr.className = "task-main-row";
     const [dot, runtime] = runtimeInfo(item);
     const runDisabled = !item.task.enabled || item.state.running;
     const stopDisabled = !item.state.running;
+    const runStateText = item.state.running ? "运行中" : "未运行";
     const runLabel = item.task.type === 'long_running'
-      ? (item.state.running ? '运行中' : '启动')
-      : (item.state.running ? '执行中' : '执行一次');
-    const toggleLabel = item.task.enabled ? '禁用' : '启用';
+      ? ('启动(' + runStateText + ')')
+      : ('执行一次(' + runStateText + ')');
+    const toggleLabel = item.task.enabled ? '禁用(已启用)' : '启用(已禁用)';
+    const stopLabel = item.state.running ? '停止(运行中)' : '停止(未运行)';
     tr.innerHTML =
       "<td>" + enabledBadge(item) + "</td>" +
       "<td><span class=\"status\"><span class=\"dot " + dot + "\"></span>" + esc(runtime) + "</span></td>" +
@@ -706,17 +715,21 @@ function renderTasks() {
       "<td><code>" + esc(item.task.command) + "</code></td>" +
       "<td>" + (item.task.type === 'long_running' ? '长期' : '一次性') + "</td>" +
       "<td>" + cronAndNext(item) + "</td>" +
-      "<td>" + lastResult(item) + "</td>" +
-      "<td><div class=\"actions\">" +
+      "<td>" + lastResult(item) + "</td>";
+    const actionTr = document.createElement("tr");
+    actionTr.className = "task-actions-row";
+    actionTr.innerHTML =
+      "<td colspan=\"7\"><div class=\"actions\">" +
       "<button data-a=\"edit\" data-id=\"" + item.task.id + "\" class=\"alt\">编辑</button>" +
       "<button data-a=\"toggle\" data-id=\"" + item.task.id + "\" class=\"alt\">" + toggleLabel + "</button>" +
       "<button data-a=\"run\" data-id=\"" + item.task.id + "\" " + (runDisabled ? "disabled" : "") + ">" + runLabel + "</button>" +
-      "<button data-a=\"stop\" data-id=\"" + item.task.id + "\" class=\"alt\" " + (stopDisabled ? "disabled" : "") + ">停止</button>" +
-      "<button data-a=\"log\" data-id=\"" + item.task.id + "\" class=\"alt\">日志</button>" +
-      "<button data-a=\"clearlog\" data-id=\"" + item.task.id + "\" class=\"alt\">清空日志</button>" +
-      "<button data-a=\"del\" data-id=\"" + item.task.id + "\" class=\"danger\">删除</button>" +
+      "<button data-a=\"stop\" data-id=\"" + item.task.id + "\" class=\"alt\" " + (stopDisabled ? "disabled" : "") + ">" + stopLabel + "</button>" +
+      "<button data-a=\"log\" data-id=\"" + item.task.id + "\" class=\"alt\">日志(查看)</button>" +
+      "<button data-a=\"clearlog\" data-id=\"" + item.task.id + "\" class=\"alt\">清空日志(最近1000行)</button>" +
+      "<button data-a=\"del\" data-id=\"" + item.task.id + "\" class=\"danger\">删除(任务)</button>" +
       "</div></td>";
     tbody.appendChild(tr);
+    tbody.appendChild(actionTr);
   }
 }
 
