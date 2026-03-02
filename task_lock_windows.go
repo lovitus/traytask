@@ -16,8 +16,8 @@ var (
 	taskLockCloseHandleProc  = taskLockKernel32.NewProc("CloseHandle")
 )
 
-func acquireTaskRunLock(taskID string) (func(), bool, error) {
-	name := fmt.Sprintf("Local\\TrayTaskTaskRun_%s", taskID)
+func acquireTaskRunLock(lockKey string) (func(), bool, error) {
+	name := fmt.Sprintf("Local\\TrayTaskTaskRun_%s", lockKey)
 	namePtr := syscall.StringToUTF16Ptr(name)
 
 	h, _, callErr := taskLockCreateMutexW.Call(0, 1, uintptr(unsafe.Pointer(namePtr)))

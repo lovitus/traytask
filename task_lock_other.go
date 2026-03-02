@@ -2,7 +2,7 @@
 
 package main
 
-func acquireTaskRunLock(taskID string) (func(), bool, error) {
-	_ = taskID
+func acquireTaskRunLock(lockKey string) (func(), bool, error) {
+	_ = lockKey
 	return func() {}, true, nil
 }
