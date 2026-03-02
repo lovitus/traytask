@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -521,8 +519,7 @@ func (m *Manager) startTask(id, trigger string) {
 		m.mu.Unlock()
 		return
 	}
-	lockKey := taskRunLockKey(task)
-	releaseTaskRunLock, acquired, lockErr := acquireTaskRunLock(lockKey)
+	releaseTaskRunLock, acquired, lockErr := acquireTaskRunLock(task.ID)
 	if lockErr != nil {
 		m.logSystem(task.ID, "[warn] task lock failed: "+lockErr.Error())
 	}
@@ -534,7 +531,7 @@ func (m *Manager) startTask(id, trigger string) {
 			st.LastError = "task already running in another process"
 		}
 		m.mu.Unlock()
-		m.logSystem(task.ID, "[skip] another process is already running this task lock key")
+		m.logSystem(task.ID, "[skip] another process is already running this task")
 		m.notify()
 		return
 	}
@@ -682,15 +679,6 @@ func (m *Manager) startTask(id, trigger string) {
 		m.logSystem(task.ID, "[end] error="+waitErr.Error())
 	}
 	m.notify()
-}
-
-func taskRunLockKey(task Task) string {
-	if task.Type == TaskTypeLongRunning && strings.TrimSpace(task.CronExpr) == "" {
-		normalized := strings.ToLower(strings.TrimSpace(task.Command))
-		sum := sha1.Sum([]byte(normalized))
-		return "cmd:" + hex.EncodeToString(sum[:])
-	}
-	return "task:" + task.ID
 }
 
 func (m *Manager) streamToLog(taskID, stream string, r io.Reader) {
