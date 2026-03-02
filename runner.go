@@ -26,6 +26,7 @@ type activeProc struct {
 	runID     string
 	taskID    string
 	isLongRun bool
+	release   func()
 }
 
 type taskState struct {
@@ -518,6 +519,22 @@ func (m *Manager) startTask(id, trigger string) {
 		m.mu.Unlock()
 		return
 	}
+	releaseTaskRunLock, acquired, lockErr := acquireTaskRunLock(id)
+	if lockErr != nil {
+		m.logSystem(task.ID, "[warn] task lock failed: "+lockErr.Error())
+	}
+	if !acquired {
+		st := m.states[id]
+		if st != nil {
+			st.Running = false
+			st.Status = "skipped"
+			st.LastError = "task already running in another instance"
+		}
+		m.mu.Unlock()
+		m.logSystem(task.ID, "[skip] another instance is already running this task")
+		m.notify()
+		return
+	}
 	st := m.states[id]
 	if st == nil {
 		st = &taskState{TaskRuntimeState: TaskRuntimeState{TaskID: id, Enabled: task.Enabled}}
@@ -557,7 +574,14 @@ func (m *Manager) startTask(id, trigger string) {
 		return
 	}
 	runID := newID()
-	proc := &activeProc{cmd: cmd, cancel: cancel, runID: runID, taskID: task.ID, isLongRun: task.Type == TaskTypeLongRunning}
+	proc := &activeProc{
+		cmd:       cmd,
+		cancel:    cancel,
+		runID:     runID,
+		taskID:    task.ID,
+		isLongRun: task.Type == TaskTypeLongRunning,
+		release:   releaseTaskRunLock,
+	}
 	m.procs[id] = proc
 	m.mu.Unlock()
 
@@ -565,6 +589,9 @@ func (m *Manager) startTask(id, trigger string) {
 	if err := cmd.Start(); err != nil {
 		m.mu.Lock()
 		if p, ok := m.procs[id]; ok && p.runID == runID {
+			if p.release != nil {
+				p.release()
+			}
 			delete(m.procs, id)
 		}
 		st := m.states[id]
@@ -610,6 +637,9 @@ func (m *Manager) startTask(id, trigger string) {
 
 	m.mu.Lock()
 	if p, ok := m.procs[id]; ok && p.runID == runID {
+		if p.release != nil {
+			p.release()
+		}
 		delete(m.procs, id)
 	}
 	st = m.states[id]
