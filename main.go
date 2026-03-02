@@ -36,6 +36,7 @@ func main() {
 	alreadyRunning, err := ensureSingleInstance()
 	if err != nil {
 		log.Printf("single instance warning: %v", err)
+		return
 	}
 	if alreadyRunning {
 		return

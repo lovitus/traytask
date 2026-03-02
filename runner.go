@@ -369,6 +369,10 @@ func (m *Manager) StartTask(id string) error {
 		m.mu.Unlock()
 		return errors.New("task is disabled")
 	}
+	if _, ok := m.procs[id]; ok {
+		m.mu.Unlock()
+		return errors.New("task is already running")
+	}
 	if st, ok := m.states[id]; ok && st.Running {
 		m.mu.Unlock()
 		return errors.New("task is already running")
@@ -421,6 +425,9 @@ func (m *Manager) runScheduled(taskID string) {
 	running := false
 	if st, ok := m.states[taskID]; ok {
 		running = st.Running
+	}
+	if _, ok := m.procs[taskID]; ok {
+		running = true
 	}
 	m.mu.RUnlock()
 
@@ -572,6 +579,9 @@ func (m *Manager) startTask(id, trigger string) {
 		m.logSystem(task.ID, "[error] start failed: "+err.Error())
 		m.notify()
 		return
+	}
+	if err := attachProcessForLifecycle(cmd); err != nil {
+		m.logSystem(task.ID, "[warn] process lifecycle attach failed: "+err.Error())
 	}
 
 	m.mu.Lock()
